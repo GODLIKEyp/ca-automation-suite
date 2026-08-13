@@ -1,0 +1,44 @@
+{
+  "name": "ca-automation-suite",
+  "version": "1.0.0",
+  "description": "CA Practice Automation Suite — Trigger.dev v3 backend with 5 production-grade tasks for Indian chartered accountants (invoice parsing, GSTR-2B reconciliation, bank statement to Tally, capital gains extraction, client nudge dispatcher).",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "npx trigger.dev@latest dev",
+    "deploy": "npx trigger.dev@latest deploy",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "ca",
+    "chartered-accountant",
+    "gst",
+    "gstr2b",
+    "tally",
+    "invoice",
+    "capital-gains",
+    "trigger.dev",
+    "gemini",
+    "automation"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@google/genai": "^2.16.0",
+    "@trigger.dev/sdk": "^4.5.10",
+    "dotenv": "^17.4.2",
+    "papaparse": "^5.5.4",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@trigger.dev/build": "^4.5.10",
+    "@types/node": "^26.2.0",
+    "@types/papaparse": "^5.5.2",
+    "typescript": "^5.9.3"
+  }
+}
