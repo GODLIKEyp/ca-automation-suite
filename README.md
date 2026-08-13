@@ -251,7 +251,7 @@ Open the dashboard, pick any of the 5 tasks, paste a payload, hit **Run**.
 ### B. Programmatic trigger
 
 ```ts
-import { tasks } from "@trigger.dev/sdk/v3";
+import { tasks } from "@trigger.dev/sdk";
 
 await tasks.trigger("parse-invoice", { imageUrl: "https://example.com/inv.png" });
 await tasks.trigger("reconcile-gstr2b", { gstr2bRows: [...], purchaseRegisterRows: [...] });

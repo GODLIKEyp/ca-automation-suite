@@ -1,4 +1,4 @@
-import { task, logger } from "@trigger.dev/sdk/v3";
+import { task, logger } from "@trigger.dev/sdk";
 import Papa from "papaparse";
 import { z } from "zod";
 import { extractResponseText, getGenaiClient } from "../lib/gemini";
