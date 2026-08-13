@@ -30,13 +30,13 @@
   },
   "dependencies": {
     "@google/genai": "^2.16.0",
-    "@trigger.dev/sdk": "^4.5.10",
+    "@trigger.dev/sdk": "4.5.11",
     "dotenv": "^17.4.2",
     "papaparse": "^5.5.4",
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@trigger.dev/build": "^4.5.10",
+    "@trigger.dev/build": "4.5.11",
     "@types/node": "^26.2.0",
     "@types/papaparse": "^5.5.2",
     "typescript": "^5.9.3"
