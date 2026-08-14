@@ -1,4 +1,7 @@
 # Dependencies
+credentials/
+.env
+.env.*
 node_modules/
 .npm/
 .pnpm-store/
