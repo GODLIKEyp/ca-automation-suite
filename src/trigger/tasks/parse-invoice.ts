@@ -123,7 +123,10 @@ Return ONLY the JSON. No markdown, no commentary.`;
       lineItems: validated.lineItems.length,
     });
 
-    // Automatically push parsed invoice to Google Sheet review queue
+    // Automatically push parsed invoice to Google Sheet review queue.
+    // If the sync fails, log it AND re-throw so Trigger.dev marks the run
+    // as FAILED — silent failures here were the root cause of the
+    // "triggered but no rows" symptom.
     if (process.env.GOOGLE_SPREADSHEET_ID) {
       try {
         await appendInvoiceToReviewQueue(process.env.GOOGLE_SPREADSHEET_ID, {
@@ -143,9 +146,13 @@ Return ONLY the JSON. No markdown, no commentary.`;
           invoiceNumber: validated.invoiceNumber,
         });
       } catch (syncErr) {
+        const msg = `Google Sheet sync failed for invoice ${validated.invoiceNumber}: ${String(syncErr)}`;
         logger.error("parse-invoice: failed to sync to Google Sheet", {
           err: String(syncErr),
+          invoiceNumber: validated.invoiceNumber,
         });
+        // Re-throw so the run is marked FAILED in Trigger.dev.
+        throw new Error(msg);
       }
     }
 

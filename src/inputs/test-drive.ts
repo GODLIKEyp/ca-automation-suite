@@ -1,14 +1,11 @@
+import "dotenv/config";
 import { google } from "googleapis";
-import path from "node:path";
-
-const KEY_FILE = path.join(
-  process.cwd(),
-  "credentials",
-  "google-drive-service-account.json"
-);
 
 const auth = new google.auth.GoogleAuth({
-  keyFile: KEY_FILE,
+  credentials: {
+    client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+    private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+  },
   scopes: ["https://www.googleapis.com/auth/drive.readonly"],
 });
 
@@ -30,7 +27,10 @@ async function testDriveConnection() {
     console.log("\n✅ Google Drive connection successful!\n");
 
     if (files.length === 0) {
-      console.log("No files found.");
+      console.log(
+        "No files found. Ensure your target folder/files are shared with:",
+        process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL
+      );
       return;
     }
 

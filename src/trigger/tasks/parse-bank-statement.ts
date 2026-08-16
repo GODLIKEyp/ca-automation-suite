@@ -1,6 +1,7 @@
 import { task, logger } from "@trigger.dev/sdk";
 import Papa from "papaparse";
 import { z } from "zod";
+import { google } from "googleapis";
 import { extractResponseText, getGenaiClient } from "../lib/gemini";
 
 // ---------------------------------------------------------------------------
@@ -16,6 +17,7 @@ export const transactionSchema = z.object({
 
 export const bankStatementOutputSchema = z.object({
   transactions: z.array(transactionSchema),
+  spreadsheetUrl: z.string().optional(),
 });
 
 export type Transaction = z.infer<typeof transactionSchema>;
@@ -31,10 +33,6 @@ export type BankStatementPayload = z.infer<typeof bankStatementPayloadSchema>;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-/**
- * Crude but effective: pull out header row + data rows from a CSV text dump.
- * Returns columns and rows as parallel arrays.
- */
 function parseCsvText(rawCsvText: string): Papa.ParseResult<Record<string, string>> {
   return Papa.parse<Record<string, string>>(rawCsvText, {
     header: true,
@@ -58,9 +56,6 @@ function parseAmount(s: string): number {
   return Number.isFinite(n) ? Math.abs(n) : 0;
 }
 
-/**
- * Normalize a transaction into the canonical shape expected by the categorizer.
- */
 function normalizeRow(
   row: Record<string, string>
 ): { date: string; description: string; debit: number; credit: number } | null {
@@ -80,9 +75,7 @@ function normalizeRow(
   let credit = parseAmount(creditRaw);
 
   if (!debit && !credit && amountRaw) {
-    const a = parseAmount(amountRaw);
-    // Without a sign we default to debit (outflow).
-    debit = a;
+    debit = parseAmount(amountRaw);
   }
 
   if (!date && !description) return null;
@@ -92,6 +85,88 @@ function normalizeRow(
     debit,
     credit,
   };
+}
+
+/**
+ * Appends transactions to Google Sheets under 'Bank Transactions' sheet tab
+ */
+async function appendTransactionsToGoogleSheet(
+  spreadsheetId: string,
+  transactions: Transaction[]
+) {
+  const auth = new google.auth.GoogleAuth({
+    credentials: {
+      client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+      private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+    },
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
+
+  const sheets = google.sheets({ version: "v4", auth });
+
+  // 1. Ensure 'Bank Transactions' tab and headers exist
+  try {
+    const meta = await sheets.spreadsheets.get({ spreadsheetId });
+    const sheetExists = meta.data.sheets?.some(
+      (s) => s.properties?.title === "Bank Transactions"
+    );
+
+    if (!sheetExists) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [
+            {
+              addSheet: {
+                properties: { title: "Bank Transactions" },
+              },
+            },
+          ],
+        },
+      });
+
+      await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: "'Bank Transactions'!A1:G1",
+        valueInputOption: "RAW",
+        requestBody: {
+          values: [
+            [
+              "Status",
+              "Date",
+              "Description",
+              "Debit (Withdrawal)",
+              "Credit (Deposit)",
+              "Mapped Tally Ledger",
+              "Audit Check",
+            ],
+          ],
+        },
+      });
+    }
+  } catch (err) {
+    logger.warn("Sheet setup warning:", { error: err });
+  }
+
+  // 2. Format rows
+  const rows = transactions.map((t) => [
+    "🟡 Pending Review",
+    t.date,
+    t.description,
+    t.debit > 0 ? t.debit : "",
+    t.credit > 0 ? t.credit : "",
+    t.mappedTallyLedger,
+    t.mappedTallyLedger === "Unclassified" ? "⚠️ Needs Review" : "✅ Classified",
+  ]);
+
+  // 3. Append to sheet
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: "'Bank Transactions'!A:G",
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: rows },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +205,6 @@ export const parseBankStatement = task({
         .map(normalizeRow)
         .filter((r): r is NonNullable<typeof r> => r !== null);
     } else {
-      // PDF path — let Gemini do the heavy lifting.
       const pdfPart = safe.statementPdfBase64!.replace(/^data:[^;]+;base64,/, "");
       const prompt = `Extract every transaction from this bank statement PDF.
 Return JSON: { "rows": [{ "date": "YYYY-MM-DD", "description": "...", "debit": number, "credit": number }] }
@@ -208,9 +282,22 @@ Return ONLY JSON of shape: { "transactions": [ { "date": "...", "description": "
       }
     }
 
+    // ---------- 3. Append to Google Sheets ----------
+    const spreadsheetId = process.env.GOOGLE_SPREADSHEET_ID;
+    if (spreadsheetId && out.length > 0) {
+      logger.info("parse-bank-statement: syncing to Google Sheets...", { spreadsheetId });
+      await appendTransactionsToGoogleSheet(spreadsheetId, out);
+      logger.info("parse-bank-statement: Google Sheets sync complete");
+    }
+
     logger.info("parse-bank-statement: complete", {
       totalTransactions: out.length,
     });
-    return { transactions: out };
+    return {
+      transactions: out,
+      spreadsheetUrl: spreadsheetId
+        ? `https://docs.google.com/spreadsheets/d/${spreadsheetId}`
+        : undefined,
+    };
   },
 });

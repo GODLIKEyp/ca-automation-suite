@@ -1,17 +1,13 @@
 import "dotenv/config";
 import { google } from "googleapis";
-import path from "node:path";
 import { tasks } from "@trigger.dev/sdk";
 import type { parseInvoice } from "../trigger/tasks/parse-invoice";
 
-const KEY_FILE = path.join(
-  process.cwd(),
-  "credentials",
-  "google-drive-service-account.json"
-);
-
 const auth = new google.auth.GoogleAuth({
-  keyFile: KEY_FILE,
+  credentials: {
+    client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+    private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+  },
   scopes: ["https://www.googleapis.com/auth/drive.readonly"],
 });
 
@@ -28,9 +24,7 @@ const ALLOWED_MIME_TYPES = [
 
 async function findAndTriggerInvoice() {
   try {
-    // ---------------------------------------------------------
     // 1. Find Client_Invoices_Raw folder
-    // ---------------------------------------------------------
     console.log("🔍 Finding Client_Invoices_Raw folder...\n");
 
     const folderResponse = await drive.files.list({
@@ -42,7 +36,9 @@ async function findAndTriggerInvoice() {
     const folders = folderResponse.data.files ?? [];
 
     if (folders.length === 0) {
-      throw new Error("Client_Invoices_Raw folder not found.");
+      throw new Error(
+        "Client_Invoices_Raw folder not found. Ensure the folder exists in Google Drive and is shared with your service account email."
+      );
     }
 
     const folder = folders[0];
@@ -50,9 +46,7 @@ async function findAndTriggerInvoice() {
     console.log(`✅ Folder found: ${folder.name}`);
     console.log(`🆔 Folder ID: ${folder.id}\n`);
 
-    // ---------------------------------------------------------
     // 2. Find files inside the folder
-    // ---------------------------------------------------------
     console.log("🔍 Looking for invoice files...\n");
 
     const filesResponse = await drive.files.list({
@@ -70,9 +64,7 @@ async function findAndTriggerInvoice() {
 
     console.log(`✅ Found ${files.length} file(s).\n`);
 
-    // ---------------------------------------------------------
     // 3. Find a supported invoice
-    // ---------------------------------------------------------
     const invoiceFile = files.find(
       (file) =>
         file.id &&
@@ -90,9 +82,7 @@ async function findAndTriggerInvoice() {
     console.log(`📦 Type: ${invoiceFile.mimeType}`);
     console.log(`🆔 File ID: ${invoiceFile.id}\n`);
 
-    // ---------------------------------------------------------
     // 4. Download invoice
-    // ---------------------------------------------------------
     console.log("⬇️ Downloading invoice...");
 
     const downloadResponse = await drive.files.get(
@@ -110,17 +100,13 @@ async function findAndTriggerInvoice() {
     console.log(`✅ Download successful!`);
     console.log(`📏 Downloaded bytes: ${buffer.length}\n`);
 
-    // ---------------------------------------------------------
     // 5. Convert to Base64
-    // ---------------------------------------------------------
     const base64Data = buffer.toString("base64");
 
     console.log("🔤 Base64 conversion successful!");
     console.log(`📦 Base64 length: ${base64Data.length}\n`);
 
-    // ---------------------------------------------------------
     // 6. Trigger parse-invoice
-    // ---------------------------------------------------------
     console.log("⚡ Triggering parse-invoice...");
 
     const handle = await tasks.trigger<typeof parseInvoice>("parse-invoice", {
@@ -130,7 +116,6 @@ async function findAndTriggerInvoice() {
 
     console.log("✅ parse-invoice triggered successfully!");
     console.log(`🆔 Run ID: ${handle.id}`);
-    console.log("\n🎉 Milestone 3 complete!");
   } catch (error) {
     console.error("\n❌ Invoice pipeline failed:");
     console.error(error);
