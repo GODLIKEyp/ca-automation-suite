@@ -32,6 +32,8 @@
     "@google/genai": "^2.16.0",
     "@trigger.dev/sdk": "^4.5.10",
     "dotenv": "^17.4.2",
+    "exceljs": "^4.4.0",
+    "googleapis": "^174.0.1",
     "papaparse": "^5.5.4",
     "zod": "^3.25.76"
   },
