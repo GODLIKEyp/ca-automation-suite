@@ -1,6 +1,7 @@
 import { task, logger } from "@trigger.dev/sdk";
 import { z } from "zod";
 import { extractResponseText, getGenaiClient, resolveImagePart } from "../lib/gemini";
+import { appendInvoiceToReviewQueue } from "../outputs/google-sheets";
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -121,6 +122,33 @@ Return ONLY the JSON. No markdown, no commentary.`;
       totalAmount: validated.totalAmount,
       lineItems: validated.lineItems.length,
     });
+
+    // Automatically push parsed invoice to Google Sheet review queue
+    if (process.env.GOOGLE_SPREADSHEET_ID) {
+      try {
+        await appendInvoiceToReviewQueue(process.env.GOOGLE_SPREADSHEET_ID, {
+          invoiceNumber: validated.invoiceNumber,
+          invoiceDate: validated.invoiceDate,
+          vendorName: validated.vendorName,
+          vendorGstin: validated.vendorGstin,
+          taxableAmount: validated.taxableAmount,
+          cgst: validated.cgst,
+          sgst: validated.sgst,
+          igst: validated.igst,
+          totalAmount: validated.totalAmount,
+          fileUrl: safe.imageUrl || safe.filename,
+        });
+        logger.info("parse-invoice: synced to Google Sheet review queue", {
+          spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID,
+          invoiceNumber: validated.invoiceNumber,
+        });
+      } catch (syncErr) {
+        logger.error("parse-invoice: failed to sync to Google Sheet", {
+          err: String(syncErr),
+        });
+      }
+    }
+
     return validated;
   },
 });
