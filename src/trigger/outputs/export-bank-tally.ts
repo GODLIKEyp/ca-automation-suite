@@ -68,6 +68,3 @@ export async function exportApprovedBankToTally(spreadsheetId: string) {
     console.log(`🎉 Export complete! Generated Tally file: ${outputPath}`);
 }
 
-if (require.main === module) {
-    exportApprovedBankToTally(process.env.GOOGLE_SPREADSHEET_ID!);
-}

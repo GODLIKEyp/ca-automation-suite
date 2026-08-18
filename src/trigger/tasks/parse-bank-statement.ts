@@ -3,6 +3,7 @@ import Papa from "papaparse";
 import { z } from "zod";
 import { google } from "googleapis";
 import { extractResponseText, getGenaiClient } from "../lib/gemini";
+import { decryptPdf } from "../lib/pdf";
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -27,6 +28,7 @@ export const bankStatementPayloadSchema = z.object({
   statementPdfBase64: z.string().optional(),
   rawCsvText: z.string().optional(),
   filename: z.string().optional(),
+  pdfPassword: z.string().optional(),
 });
 
 export type BankStatementPayload = z.infer<typeof bankStatementPayloadSchema>;
@@ -207,8 +209,47 @@ export const parseBankStatement = task({
       rawRows = parsed.data
         .map(normalizeRow)
         .filter((r): r is NonNullable<typeof r> => r !== null);
-    } else {
-      const pdfPart = safe.statementPdfBase64!.replace(/^data:[^;]+;base64,/, "");
+        } else {
+      let pdfPart = safe.statementPdfBase64!.replace(
+        /^data:[^;]+;base64,/,
+        ""
+      );
+
+      try {
+  logger.info(
+    "parse-bank-statement: checking PDF protection"
+  );
+
+  pdfPart = await decryptPdf(
+    pdfPart,
+    safe.pdfPassword
+  );
+
+  logger.info(
+    "parse-bank-statement: PDF ready for Gemini"
+  );
+} catch (error) {
+  if (
+    error instanceof Error &&
+    error.message === "PDF_PASSWORD_REQUIRED"
+  ) {
+    throw new Error(
+      "PDF_PASSWORD_REQUIRED: This bank statement is password protected. Please provide the PDF password."
+    );
+  }
+
+  if (
+    error instanceof Error &&
+    error.message === "INVALID_PDF_PASSWORD"
+  ) {
+    throw new Error(
+      "INVALID_PDF_PASSWORD: The PDF password is incorrect."
+    );
+  }
+
+  throw error;
+}
+
       const prompt = `Extract every transaction from this bank statement PDF.
 Return JSON: { "rows": [{ "date": "YYYY-MM-DD", "description": "...", "debit": number, "credit": number }] }
 Use 0 for missing debit/credit. ISO-8601 dates. Return ONLY JSON.`;
