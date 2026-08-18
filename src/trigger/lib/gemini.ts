@@ -14,6 +14,7 @@ export function getGenaiClient(): GoogleGenAI {
       "GEMINI_API_KEY env var is not set. Add it to .env (see .env.example)."
     );
   }
+
   cachedClient = new GoogleGenAI({ apiKey });
   return cachedClient;
 }
@@ -58,6 +59,7 @@ export async function resolveImagePart(input: {
 export function extractResponseText(response: any): string {
   if (!response) return "";
   if (typeof response.text === "string") return response.text;
+  if (typeof response.text === "function") return response.text();
   const parts = response.candidates?.[0]?.content?.parts;
   if (Array.isArray(parts)) {
     return parts.map((p: any) => p.text ?? "").join("");
