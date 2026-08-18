@@ -2,12 +2,26 @@ import "dotenv/config";
 import { google } from "googleapis";
 import { tasks } from "@trigger.dev/sdk";
 import type { parseBankStatement } from "../trigger/tasks/parse-bank-statement";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+import { createInterface } from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
+import { decryptPdf } from "../trigger/lib/pdf";
+
+const credentialsPath = path.resolve(
+    __dirname,
+    "../../credentials/google-drive-service-account.json"
+);
+
+const credentials = JSON.parse(
+    readFileSync(credentialsPath, "utf-8")
+);
 
 const auth = new google.auth.GoogleAuth({
-    credentials: {
-        client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-        private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
-    },
+    credentials,
     scopes: ["https://www.googleapis.com/auth/drive.readonly"],
 });
 
@@ -19,7 +33,7 @@ async function findAndTriggerBankStatement() {
 
         let folderId: string | undefined;
         const folderRes = await drive.files.list({
-            q: "name = 'Client_Bank_Statements_Raw' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+        q: "name = 'Bank Transactions' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
             fields: "files(id, name)",
             pageSize: 1,
         });
@@ -69,12 +83,35 @@ async function findAndTriggerBankStatement() {
                 filename: statementFile.name ?? "statement.csv",
             };
         } else {
-            const buffer = Buffer.from(download.data as ArrayBuffer);
-            payload = {
-                statementPdfBase64: buffer.toString("base64"),
-                filename: statementFile.name ?? "statement.pdf",
-            };
+    const buffer = Buffer.from(download.data as ArrayBuffer);
+    let pdfBase64 = buffer.toString("base64");
+
+    const rl = createInterface({ input, output });
+
+    try {
+        const password = await rl.question(
+            "🔐 Enter PDF password (leave blank if none): "
+        );
+
+        if (password) {
+            console.log("🔓 Decrypting PDF...");
+
+            pdfBase64 = await decryptPdf(
+                pdfBase64,
+                password
+            );
+
+            console.log("✅ PDF decrypted successfully.");
         }
+    } finally {
+        rl.close();
+    }
+
+    payload = {
+        statementPdfBase64: pdfBase64,
+        filename: statementFile.name ?? "statement.pdf",
+    };
+}
 
         console.log("⚡ Triggering parse-bank-statement task...");
         const handle = await tasks.trigger<typeof parseBankStatement>("parse-bank-statement", payload);
