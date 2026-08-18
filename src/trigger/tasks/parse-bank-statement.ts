@@ -26,6 +26,7 @@ export type BankStatementOutput = z.infer<typeof bankStatementOutputSchema>;
 export const bankStatementPayloadSchema = z.object({
   statementPdfBase64: z.string().optional(),
   rawCsvText: z.string().optional(),
+  filename: z.string().optional(),
 });
 
 export type BankStatementPayload = z.infer<typeof bankStatementPayloadSchema>;
@@ -88,7 +89,7 @@ function normalizeRow(
 }
 
 /**
- * Appends transactions to Google Sheets under 'Bank Transactions' sheet tab
+ * Appends transactions to Google Sheets under 'Bank Transactions' tab
  */
 async function appendTransactionsToGoogleSheet(
   spreadsheetId: string,
@@ -103,12 +104,13 @@ async function appendTransactionsToGoogleSheet(
   });
 
   const sheets = google.sheets({ version: "v4", auth });
+  const tabName = "Bank Transactions";
 
   // 1. Ensure 'Bank Transactions' tab and headers exist
   try {
     const meta = await sheets.spreadsheets.get({ spreadsheetId });
     const sheetExists = meta.data.sheets?.some(
-      (s) => s.properties?.title === "Bank Transactions"
+      (s) => s.properties?.title === tabName
     );
 
     if (!sheetExists) {
@@ -118,7 +120,7 @@ async function appendTransactionsToGoogleSheet(
           requests: [
             {
               addSheet: {
-                properties: { title: "Bank Transactions" },
+                properties: { title: tabName },
               },
             },
           ],
@@ -127,18 +129,18 @@ async function appendTransactionsToGoogleSheet(
 
       await sheets.spreadsheets.values.update({
         spreadsheetId,
-        range: "'Bank Transactions'!A1:G1",
+        range: `'${tabName}'!A1:G1`,
         valueInputOption: "RAW",
         requestBody: {
           values: [
             [
-              "Status",
-              "Date",
-              "Description",
-              "Debit (Withdrawal)",
-              "Credit (Deposit)",
-              "Mapped Tally Ledger",
-              "Audit Check",
+              "STATUS",
+              "DATE",
+              "DESCRIPTION",
+              "DEBIT (WITHDRAWAL)",
+              "CREDIT (DEPOSIT)",
+              "MAPPED TALLY LEDGER",
+              "AUDIT CHECK",
             ],
           ],
         },
@@ -156,13 +158,13 @@ async function appendTransactionsToGoogleSheet(
     t.debit > 0 ? t.debit : "",
     t.credit > 0 ? t.credit : "",
     t.mappedTallyLedger,
-    t.mappedTallyLedger === "Unclassified" ? "⚠️ Needs Review" : "✅ Classified",
+    t.mappedTallyLedger === "Unclassified" ? "⚠️ Needs Classification" : "✅ Classified",
   ]);
 
   // 3. Append to sheet
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: "'Bank Transactions'!A:G",
+    range: `'${tabName}'!A:G`,
     valueInputOption: "USER_ENTERED",
     insertDataOption: "INSERT_ROWS",
     requestBody: { values: rows },
@@ -189,6 +191,7 @@ export const parseBankStatement = task({
     logger.info("parse-bank-statement: start", {
       hasCsv: !!safe.rawCsvText,
       hasPdf: !!safe.statementPdfBase64,
+      filename: safe.filename,
     });
 
     // ---------- 1. Pull raw rows ----------
@@ -208,7 +211,8 @@ export const parseBankStatement = task({
       const pdfPart = safe.statementPdfBase64!.replace(/^data:[^;]+;base64,/, "");
       const prompt = `Extract every transaction from this bank statement PDF.
 Return JSON: { "rows": [{ "date": "YYYY-MM-DD", "description": "...", "debit": number, "credit": number }] }
-Use 0 for missing debit/credit. ISO-8601 dates. No commentary, JSON only.`;
+Use 0 for missing debit/credit. ISO-8601 dates. Return ONLY JSON.`;
+      
       const genai = getGenaiClient();
       const response = await genai.models.generateContent({
         model: "gemini-2.5-flash",
@@ -249,17 +253,14 @@ Use 0 for missing debit/credit. ISO-8601 dates. No commentary, JSON only.`;
     for (let i = 0; i < rawRows.length; i += BATCH_SIZE) {
       const batch = rawRows.slice(i, i + BATCH_SIZE);
       const prompt = `You are a Tally Prime ledger-mapping assistant.
-Given the following array of bank transactions, return a JSON object with key "transactions"
-preserving the original order. For each row, fill "mappedTallyLedger" using a Tally-compliant
-ledger head (e.g., "Conveyance Expense", "Fuel Expense", "Telephone Expense",
-"Office Rent", "Salaries & Wages", "Bank Charges", "Interest Received", "Sales - Domestic",
-"Purchase - Domestic", "TDS Receivable", "GST Payable", "Capital Introduced", "Unclassified").
+Given the following array of bank transactions, return a JSON object with key "transactions" preserving the original order.
+For each row, fill "mappedTallyLedger" with standard Tally ledger heads (e.g., "Office Rent", "Salaries & Wages", "Bank Charges", "Interest Received", "Sales - Domestic", "Purchase - Domestic", "Telephone Expense", "Fuel Expense", "TDS Receivable", "GST Payable", "Unclassified").
 Round debit/credit to 2 decimals; keep date & description as-is.
 
 Bank transactions:
 ${JSON.stringify(batch, null, 2)}
 
-Return ONLY JSON of shape: { "transactions": [ { "date": "...", "description": "...", "debit": number, "credit": number, "mappedTallyLedger": "..." } ] }`;
+Return ONLY JSON: { "transactions": [ { "date": "...", "description": "...", "debit": number, "credit": number, "mappedTallyLedger": "..." } ] }`;
 
       const response = await genai.models.generateContent({
         model: "gemini-2.5-flash",
@@ -271,14 +272,15 @@ Return ONLY JSON of shape: { "transactions": [ { "date": "...", "description": "
       const txs = Array.isArray(json.transactions) ? json.transactions : [];
 
       for (const t of txs) {
-        const parsed = transactionSchema.parse({
-          date: t.date ?? "",
-          description: t.description ?? "",
-          debit: Number(t.debit ?? 0) || 0,
-          credit: Number(t.credit ?? 0) || 0,
-          mappedTallyLedger: t.mappedTallyLedger ?? "Unclassified",
-        });
-        out.push(parsed);
+        out.push(
+          transactionSchema.parse({
+            date: t.date ?? "",
+            description: t.description ?? "",
+            debit: Number(t.debit ?? 0) || 0,
+            credit: Number(t.credit ?? 0) || 0,
+            mappedTallyLedger: t.mappedTallyLedger ?? "Unclassified",
+          })
+        );
       }
     }
 
@@ -290,9 +292,7 @@ Return ONLY JSON of shape: { "transactions": [ { "date": "...", "description": "
       logger.info("parse-bank-statement: Google Sheets sync complete");
     }
 
-    logger.info("parse-bank-statement: complete", {
-      totalTransactions: out.length,
-    });
+    logger.info("parse-bank-statement: complete", { totalTransactions: out.length });
     return {
       transactions: out,
       spreadsheetUrl: spreadsheetId
