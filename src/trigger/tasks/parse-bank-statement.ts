@@ -3,6 +3,7 @@ import Papa from "papaparse";
 import { z } from "zod";
 import { google } from "googleapis";
 import { extractResponseText, getGenaiClient } from "../lib/gemini";
+import { resolveTaxRules, type TaxRules } from "../lib/tax-rules";
 import { decryptPdf } from "../lib/pdf";
 
 // ---------------------------------------------------------------------------
@@ -14,6 +15,8 @@ export const transactionSchema = z.object({
   debit: z.number().nonnegative().default(0),
   credit: z.number().nonnegative().default(0),
   mappedTallyLedger: z.string().default("Unclassified"),
+  auditFlags: z.array(z.string()).default([]),
+  auditRiskLevel: z.enum(["LOW", "MEDIUM", "HIGH"]).default("LOW"),
 });
 
 export const bankStatementOutputSchema = z.object({
@@ -90,6 +93,119 @@ function normalizeRow(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Audit engine — Indian statutory checks
+// ---------------------------------------------------------------------------
+export type AuditRiskLevel = "LOW" | "MEDIUM" | "HIGH";
+
+export interface AuditResult {
+  auditFlags: string[];
+  auditRiskLevel: AuditRiskLevel;
+}
+
+/**
+ * Evaluates a transaction against the configured tax rules for the given
+ * (or default) financial year. All thresholds, sections, and keywords are
+ * sourced from `src/trigger/lib/tax-rules.ts` — edit that file to reflect
+ * a new Finance Act; no changes needed here.
+ *
+ * Side effect: if the transaction matches a `lifestyleKeywords` token and
+ * Gemini did not already classify it as "Proprietor Drawings", this
+ * function reclassifies it (safety-net deterministic pass).
+ */
+export function evaluateTransactionAudit(
+  t: Transaction,
+  financialYear?: string
+): AuditResult {
+  const rules: TaxRules = resolveTaxRules(financialYear);
+  const desc = (t.description || "").toLowerCase();
+  const flags: string[] = [];
+  const amount = t.debit > 0 ? t.debit : t.credit;
+
+  // ---- Cash disallowance (default: Sec 40A(3), > ₹10,000) ----
+  const isCashSpend =
+    t.debit > rules.cashDisallowance.limit &&
+    rules.cashDisallowance.keywords.some((tok) => desc.includes(tok));
+  if (isCashSpend) {
+    flags.push(
+      `🔴 ${rules.cashDisallowance.section}: Cash payment > ₹${rules.cashDisallowance.limit.toLocaleString("en-IN")} (Tax Disallowance Risk)`
+    );
+  }
+
+  // ---- Cash receipt penalty (default: Sec 269ST, ≥ ₹2,00,000) ----
+  const isCashReceipt =
+    t.credit >= rules.cashReceipt.limit &&
+    rules.cashReceipt.keywords.some((tok) => desc.includes(tok));
+  if (isCashReceipt) {
+    flags.push(
+      `🚨 ${rules.cashReceipt.section}: Cash receipt >= ₹${(rules.cashReceipt.limit / 100_000).toFixed(0)} Lakh (Penalty Risk)`
+    );
+  }
+
+  // ---- TDS on contractors (default: Sec 194C, ≥ ₹30,000) ----
+  const isTdsContractor =
+    t.debit >= rules.tdsContractor.limit &&
+    rules.tdsContractor.keywords.some((tok) => desc.includes(tok));
+  if (isTdsContractor) {
+    flags.push(
+      `�️ Check TDS (${rules.tdsContractor.section} Applicability)`
+    );
+  }
+
+  // ---- TDS on professionals (default: Sec 194J, ≥ ₹30,000) ----
+  const isTdsProfessional =
+    t.debit >= rules.tdsProfessional.limit &&
+    rules.tdsProfessional.keywords.some((tok) => desc.includes(tok));
+  if (isTdsProfessional) {
+    flags.push(
+      `⚠️ Check TDS (${rules.tdsProfessional.section} Applicability)`
+    );
+  }
+
+  // ---- TDS on rent (default: Sec 194-I, ≥ ₹50,000, ledger = Office Rent) ----
+  const isRentSpend =
+    t.debit >= rules.tdsRent.limit &&
+    (t.mappedTallyLedger || "").toLowerCase() ===
+      rules.tdsRent.ledger.toLowerCase();
+  if (isRentSpend) {
+    flags.push(
+      `⚠️ Check TDS (${rules.tdsRent.section} Applicability)`
+    );
+  }
+
+  // ---- High-value round-sum (default: ≥ ₹1,00,000, no invoice signal) ----
+  const isHighValue = amount >= rules.roundSumThreshold;
+  const isRoundSum =
+    amount > 0 && (amount % 10_000 === 0 || amount % 50_000 === 0);
+  const hasInvoiceSignal = /\b(inv|gst|gstin|invoice|bill|receipt)\b/i.test(
+    t.description
+  );
+  if (isHighValue && isRoundSum && !hasInvoiceSignal) {
+    flags.push("🔍 High-Value Round-Sum Transaction");
+  }
+
+  // ---- Lifestyle → Proprietor Drawings (safety net) ----
+  const isLifestyle =
+    t.mappedTallyLedger !== "Proprietor Drawings" &&
+    t.debit > 0 &&
+    rules.lifestyleKeywords.some((tok) => desc.includes(tok));
+  if (isLifestyle) {
+    t.mappedTallyLedger = "Proprietor Drawings";
+    flags.push("ℹ️ Auto-reclassified to Proprietor Drawings (lifestyle spend)");
+  }
+
+  if (flags.length === 0) {
+    flags.push("✅ Standard Business Txn");
+  }
+
+  // Risk level roll-up: any 🔴 / 🚨 → HIGH; any ⚠️ → MEDIUM; else LOW.
+  let risk: AuditRiskLevel = "LOW";
+  if (flags.some((f) => f.startsWith("🔴") || f.startsWith("🚨"))) risk = "HIGH";
+  else if (flags.some((f) => f.startsWith("⚠️"))) risk = "MEDIUM";
+
+  return { auditFlags: flags, auditRiskLevel: risk };
+}
+
 /**
  * Appends transactions to Google Sheets under 'Bank Transactions' tab
  */
@@ -108,7 +224,18 @@ async function appendTransactionsToGoogleSheet(
   const sheets = google.sheets({ version: "v4", auth });
   const tabName = "Bank Transactions";
 
-  // 1. Ensure 'Bank Transactions' tab and headers exist
+  // 1. Ensure 'Bank Transactions' tab and headers exist (8-column schema)
+  const EXPECTED_HEADER = [
+    "STATUS",
+    "DATE",
+    "DESCRIPTION",
+    "DEBIT (WITHDRAWAL)",
+    "CREDIT (DEPOSIT)",
+    "MAPPED TALLY LEDGER",
+    "AUDIT CHECK",
+    "AUDIT RISK LEVEL",
+  ];
+
   try {
     const meta = await sheets.spreadsheets.get({ spreadsheetId });
     const sheetExists = meta.data.sheets?.some(
@@ -128,31 +255,37 @@ async function appendTransactionsToGoogleSheet(
           ],
         },
       });
-
       await sheets.spreadsheets.values.update({
         spreadsheetId,
-        range: `'${tabName}'!A1:G1`,
+        range: `'${tabName}'!A1:H1`,
         valueInputOption: "RAW",
-        requestBody: {
-          values: [
-            [
-              "STATUS",
-              "DATE",
-              "DESCRIPTION",
-              "DEBIT (WITHDRAWAL)",
-              "CREDIT (DEPOSIT)",
-              "MAPPED TALLY LEDGER",
-              "AUDIT CHECK",
-            ],
-          ],
-        },
+        requestBody: { values: [EXPECTED_HEADER] },
       });
+    } else {
+      // Idempotent header migration: if the existing header is missing the
+      // AUDIT RISK LEVEL column (or otherwise mismatched), rewrite it.
+      const headerRes = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: `'${tabName}'!A1:H1`,
+      });
+      const existing = (headerRes.data.values?.[0] ?? []).map((c) =>
+        String(c).trim()
+      );
+      const matches = EXPECTED_HEADER.every((h, i) => existing[i] === h);
+      if (!matches) {
+        await sheets.spreadsheets.values.update({
+          spreadsheetId,
+          range: `'${tabName}'!A1:H1`,
+          valueInputOption: "RAW",
+          requestBody: { values: [EXPECTED_HEADER] },
+        });
+      }
     }
   } catch (err) {
     logger.warn("Sheet setup warning:", { error: err });
   }
 
-  // 2. Format rows
+  // 2. Format rows (8 columns)
   const rows = transactions.map((t) => [
     "🟡 Pending Review",
     t.date,
@@ -160,13 +293,14 @@ async function appendTransactionsToGoogleSheet(
     t.debit > 0 ? t.debit : "",
     t.credit > 0 ? t.credit : "",
     t.mappedTallyLedger,
-    t.mappedTallyLedger === "Unclassified" ? "⚠️ Needs Classification" : "✅ Classified",
+    t.auditFlags.join("; "),
+    t.auditRiskLevel,
   ]);
 
   // 3. Append to sheet
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `'${tabName}'!A:G`,
+    range: `'${tabName}'!A:H`,
     valueInputOption: "USER_ENTERED",
     insertDataOption: "INSERT_ROWS",
     requestBody: { values: rows },
@@ -293,10 +427,36 @@ Use 0 for missing debit/credit. ISO-8601 dates. Return ONLY JSON.`;
 
     for (let i = 0; i < rawRows.length; i += BATCH_SIZE) {
       const batch = rawRows.slice(i, i + BATCH_SIZE);
-      const prompt = `You are a Tally Prime ledger-mapping assistant.
+      const prompt = `You are a Tally Prime ledger-mapping assistant for an Indian MSME / proprietorship.
 Given the following array of bank transactions, return a JSON object with key "transactions" preserving the original order.
-For each row, fill "mappedTallyLedger" with standard Tally ledger heads (e.g., "Office Rent", "Salaries & Wages", "Bank Charges", "Interest Received", "Sales - Domestic", "Purchase - Domestic", "Telephone Expense", "Fuel Expense", "TDS Receivable", "GST Payable", "Unclassified").
-Round debit/credit to 2 decimals; keep date & description as-is.
+For each row, fill "mappedTallyLedger" with standard Tally ledger heads.
+
+CLASSIFICATION RULES (strict):
+1. PERSONAL / LIFESTYLE spends MUST be classified as "Proprietor Drawings" — these are not business expenses. Examples include but are not limited to:
+   - Food delivery: Swiggy, Zomato, EatFit, Magicpin
+   - Quick commerce / groceries for personal use: Blinkit, Zepto, Instamart, BigBasket (when personal)
+   - Subscriptions / OTT: Netflix, Amazon Prime (personal), Hotstar, Spotify, YouTube Premium
+   - Personal shopping / fashion: Amazon (retail, not Amazon Business), Myntra, Ajio, Flipkart (personal), Nykaa
+   - Personal education: school fees, college fees, tuition, coaching classes
+   - Personal medical: hospitals, clinics, pharmacy, Apollo, Medplus, diagnostic labs (personal)
+   - Jewelry: Tanishq, Malabar, Joyalukkas, local jewelers (personal adornment)
+   - Personal travel: MakeMyTrip, Goibibo, IRCTC, Ola, Uber, Rapido (personal), personal hotel bookings
+2. STANDARD BUSINESS spends should map to canonical Tally heads:
+   - "Office Rent" — rent paid to landlord for office/warehouse
+   - "Salaries & Wages" — payroll, salary, bonus, incentive payouts to staff
+   - "Bank Charges" — bank fees, NEFT/IMPS charges, SMS alerts, AMC on locker
+   - "Professional Fees" — CA, CS, lawyer, advocate, consultancy fees
+   - "Contractor Expense" — fabrication, civil works, maintenance contractors, freight
+   - "Sales - Domestic" — receipts from Indian customers for goods/services
+   - "Purchase - Domestic" — payments to Indian vendors for goods/services
+   - "Telephone Expense" / "Internet Expense" — telecom, broadband, mobile bills (business)
+   - "Fuel Expense" — petrol/diesel for vehicles, HPCL/IOCL/BPCL fuel cards (business)
+   - "TDS Receivable" — TDS deducted on our receipts by customers
+   - "GST Payable" — GST payments to government
+   - "Interest Received" — interest credits from bank/FD
+   - "Unclassified" — only when genuinely ambiguous (use sparingly)
+
+Keep date & description exactly as given; round debit/credit to 2 decimals.
 
 Bank transactions:
 ${JSON.stringify(batch, null, 2)}
@@ -313,15 +473,22 @@ Return ONLY JSON: { "transactions": [ { "date": "...", "description": "...", "de
       const txs = Array.isArray(json.transactions) ? json.transactions : [];
 
       for (const t of txs) {
-        out.push(
-          transactionSchema.parse({
-            date: t.date ?? "",
-            description: t.description ?? "",
-            debit: Number(t.debit ?? 0) || 0,
-            credit: Number(t.credit ?? 0) || 0,
-            mappedTallyLedger: t.mappedTallyLedger ?? "Unclassified",
-          })
-        );
+        const parsed = transactionSchema.parse({
+          date: t.date ?? "",
+          description: t.description ?? "",
+          debit: Number(t.debit ?? 0) || 0,
+          credit: Number(t.credit ?? 0) || 0,
+          mappedTallyLedger: t.mappedTallyLedger ?? "Unclassified",
+          auditFlags: [],
+          auditRiskLevel: "LOW" as const,
+        });
+        const audit = evaluateTransactionAudit(parsed);
+        out.push({
+          ...parsed,
+          mappedTallyLedger: parsed.mappedTallyLedger, // may have been mutated by safety-net
+          auditFlags: audit.auditFlags,
+          auditRiskLevel: audit.auditRiskLevel,
+        });
       }
     }
 

@@ -17,7 +17,7 @@ export async function exportApprovedBankToTally(spreadsheetId: string) {
     const sheets = google.sheets({ version: "v4", auth });
     const response = await sheets.spreadsheets.values.get({
         spreadsheetId,
-        range: "'Bank Transactions'!A2:G",
+        range: "'Bank Transactions'!A2:H",
     });
 
     const rows = response.data.values ?? [];
@@ -43,21 +43,31 @@ export async function exportApprovedBankToTally(spreadsheetId: string) {
     ];
 
     approvedRows.forEach((r) => {
-        const date = r[2] || "";
-        const description = r[3] || "";
-        const debit = Number(r[4]) || 0;
-        const credit = Number(r[5]) || 0;
-        const ledger = r[6] || "Unclassified";
+        const date = r[1] || "";
+        const description = r[2] || "";
+        const debit = Number(r[3]) || 0;
+        const credit = Number(r[4]) || 0;
+        const ledger = r[5] || "Unclassified";
+        const auditFlags = r[6] || "";
+        const auditRiskLevel = r[7] || "LOW";
 
-        const isPayment = debit > 0;
-        const amount = isPayment ? debit : credit;
+        const isDrawings = ledger === "Proprietor Drawings";
+        const isPayment = isDrawings || debit > 0;
+        const amount = isDrawings ? debit || credit : isPayment ? debit : credit;
         const voucherType = isPayment ? "Payment" : "Receipt";
+        const partyLedger = isDrawings ? "Drawings A/c" : ledger;
+
+        if (auditRiskLevel === "HIGH") {
+            console.warn(
+                `⚠️ Exporting HIGH-risk approved row: ${description} [${auditFlags}]`
+            );
+        }
 
         worksheet.addRow({
             date,
             type: voucherType,
             bankAccount: "HDFC Bank A/c",
-            ledger,
+            ledger: partyLedger,
             amount,
             narration: description,
         });
