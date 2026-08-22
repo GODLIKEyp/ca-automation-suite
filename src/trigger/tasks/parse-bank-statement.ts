@@ -381,6 +381,24 @@ export const parseBankStatement = task({
     );
   }
 
+  if (
+    error instanceof Error &&
+    error.message === "PDF_DECRYPTOR_UNAVAILABLE"
+  ) {
+    throw new Error(
+      "PDF_DECRYPTOR_UNAVAILABLE: qpdf is required to decrypt password-protected bank statements. Install it locally (macOS: brew install qpdf) or deploy the configured Trigger worker image."
+    );
+  }
+
+  if (
+    error instanceof Error &&
+    error.message === "PDF_DECRYPTION_FAILED"
+  ) {
+    throw new Error(
+      "PDF_DECRYPTION_FAILED: qpdf could not decrypt this PDF. Check that the file is a valid, supported PDF."
+    );
+  }
+
   throw error;
 }
 

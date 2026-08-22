@@ -11,7 +11,7 @@ export async function exportApprovedBankToTally(spreadsheetId: string) {
             client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
             private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
         },
-        scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+        scopes: ["https://www.googleapis.com/auth/spreadsheets"],
     });
 
     const sheets = google.sheets({ version: "v4", auth });
@@ -21,14 +21,23 @@ export async function exportApprovedBankToTally(spreadsheetId: string) {
     });
 
     const rows = response.data.values ?? [];
-    const approvedRows = rows.filter((r) => r[0]?.includes("Approved") || r[0]?.includes("🟢"));
+    const approvedIndices: number[] = [];
+    const approvedRows: any[][] = [];
+
+    rows.forEach((row, idx) => {
+        const status = (row[0] || "").toLowerCase();
+        if (status.includes("approved") || status.includes("🟢")) {
+            approvedIndices.push(idx + 2); // 1-based index + header row offset
+            approvedRows.push(row);
+        }
+    });
 
     if (approvedRows.length === 0) {
-        console.log("⚠️ No rows marked '🟢 Approved' found in 'Bank Transactions'.");
+        console.log("⚠️ No rows marked 'Approved' found in 'Bank Transactions'.");
         return;
     }
 
-    console.log(`📊 Processing ${approvedRows.length} approved transactions for Tally...`);
+    console.log(`📊 Found ${approvedRows.length} approved transactions. Generating Tally Excel...`);
 
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet("Tally Bank Vouchers");
@@ -36,11 +45,12 @@ export async function exportApprovedBankToTally(spreadsheetId: string) {
     worksheet.columns = [
         { header: "Voucher Date", key: "date", width: 15 },
         { header: "Voucher Type", key: "type", width: 15 },
-        { header: "Bank Account (Dr/Cr)", key: "bankAccount", width: 25 },
+        { header: "Bank Account", key: "bankAccount", width: 25 },
         { header: "Particulars / Ledger", key: "ledger", width: 30 },
         { header: "Amount (INR)", key: "amount", width: 15 },
         { header: "Narration", key: "narration", width: 40 },
     ];
+    worksheet.getRow(1).font = { bold: true };
 
     approvedRows.forEach((r) => {
         const date = r[1] || "";
@@ -48,25 +58,17 @@ export async function exportApprovedBankToTally(spreadsheetId: string) {
         const debit = Number(r[3]) || 0;
         const credit = Number(r[4]) || 0;
         const ledger = r[5] || "Unclassified";
-        const auditFlags = r[6] || "";
-        const auditRiskLevel = r[7] || "LOW";
 
         const isDrawings = ledger === "Proprietor Drawings";
         const isPayment = isDrawings || debit > 0;
-        const amount = isDrawings ? debit || credit : isPayment ? debit : credit;
+        const amount = isDrawings ? (debit || credit) : isPayment ? debit : credit;
         const voucherType = isPayment ? "Payment" : "Receipt";
         const partyLedger = isDrawings ? "Drawings A/c" : ledger;
-
-        if (auditRiskLevel === "HIGH") {
-            console.warn(
-                `⚠️ Exporting HIGH-risk approved row: ${description} [${auditFlags}]`
-            );
-        }
 
         worksheet.addRow({
             date,
             type: voucherType,
-            bankAccount: "HDFC Bank A/c",
+            bankAccount: "Kotak Bank A/c",
             ledger: partyLedger,
             amount,
             narration: description,
@@ -75,6 +77,28 @@ export async function exportApprovedBankToTally(spreadsheetId: string) {
 
     const outputPath = path.join(process.cwd(), "tally-bank-vouchers-ready.xlsx");
     await workbook.xlsx.writeFile(outputPath);
-    console.log(`🎉 Export complete! Generated Tally file: ${outputPath}`);
+    console.log(`🎉 Excel generated successfully at: ${outputPath}`);
+
+    // Mark exported rows as "🔵 Exported" in Google Sheets
+    console.log("📝 Updating status to '🔵 Exported' in Google Sheets...");
+    const updateData = approvedIndices.map((rowNum) => ({
+        range: `'Bank Transactions'!A${rowNum}`,
+        values: [["🔵 Exported"]],
+    }));
+
+    await sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+            valueInputOption: "USER_ENTERED",
+            data: updateData,
+        },
+    });
+
+    console.log(`✅ Marked ${approvedIndices.length} rows as '🔵 Exported'.`);
 }
 
+if (process.env.GOOGLE_SPREADSHEET_ID) {
+    exportApprovedBankToTally(process.env.GOOGLE_SPREADSHEET_ID);
+} else {
+    console.error("❌ GOOGLE_SPREADSHEET_ID not found in .env");
+}

@@ -268,7 +268,24 @@ await tasks.trigger("dispatch-document-nudge", {
 });
 ```
 
-### C. Deploy to Trigger.dev cloud
+### C. Bank-statement watcher prerequisites
+
+Password-protected PDF bank statements are decrypted with [QPDF](https://qpdf.sourceforge.io/). Install it before running the standalone watcher locally, and make sure it is available on your `PATH`:
+
+```bash
+# macOS
+brew install qpdf
+```
+
+Then run:
+
+```bash
+npx tsx src/inputs/bank-watcher.ts
+```
+
+The Trigger worker image installs QPDF during deployment. If the watcher reports `PDF_DECRYPTOR_UNAVAILABLE`, install QPDF locally; it does not mean that the supplied password is invalid.
+
+### D. Deploy to Trigger.dev cloud
 
 ```bash
 npx trigger.dev@latest deploy

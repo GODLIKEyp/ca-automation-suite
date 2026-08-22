@@ -1,3 +1,4 @@
+import { aptGet } from "@trigger.dev/build/extensions/core";
 import { defineConfig } from "@trigger.dev/sdk";
 
 export default defineConfig({
@@ -5,4 +6,7 @@ export default defineConfig({
   dirs: ["./src/trigger"],
   runtime: "node",
   maxDuration: 300,
+  build: {
+    extensions: [aptGet({ packages: ["qpdf"] })],
+  },
 });

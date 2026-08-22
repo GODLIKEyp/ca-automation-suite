@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -9,16 +9,11 @@ export const PDF_DECRYPTOR_UNAVAILABLE = "PDF_DECRYPTOR_UNAVAILABLE";
 export const PDF_PASSWORD_REQUIRED = "PDF_PASSWORD_REQUIRED";
 
 /**
- * Executes qpdf CLI arguments and captures exit codes & errors.
+ * Helper to execute qpdf CLI arguments via spawn, handling exit codes and missing binaries.
  */
-function runQpdf(args: string[]): Promise<{ exitCode: number | null; stderr: string }> {
+function runQpdf(args: string[]): Promise<{ exitCode: number | null }> {
   return new Promise((resolve, reject) => {
-    const child = spawn("qpdf", args);
-    let stderr = "";
-
-    child.stderr?.on("data", (data) => {
-      stderr += data.toString();
-    });
+    const child = spawn("qpdf", args, { stdio: "ignore" });
 
     child.on("error", (err: NodeJS.ErrnoException) => {
       if (err.code === "ENOENT") {
@@ -29,16 +24,19 @@ function runQpdf(args: string[]): Promise<{ exitCode: number | null; stderr: str
     });
 
     child.on("close", (code) => {
-      resolve({ exitCode: code, stderr });
+      resolve({ exitCode: code });
     });
   });
 }
 
 /**
  * Decrypts a base64-encoded PDF using qpdf.
- * Supports standard compliance exit codes:
- * - Exit 0: Success (clean)
- * - Exit 3: Success (with recoverable warnings)
+ *
+ * Handles:
+ * - Unencrypted PDFs (returns original buffer unmodified)
+ * - Numeric passwords with leading zeros (passed strictly as string)
+ * - Protected PDFs with missing or invalid passwords
+ * - Missing qpdf binary detection (PDF_DECRYPTOR_UNAVAILABLE)
  */
 export async function decryptPdf(
   base64Pdf: string,
@@ -52,20 +50,23 @@ export async function decryptPdf(
     const inputBuffer = Buffer.from(base64Pdf, "base64");
     await writeFile(tempIn, inputBuffer);
 
-    // 1. Password check
-    const checkArgs =
-      password !== undefined
-        ? ["--requires-password", `--password=${password}`, tempIn]
-        : ["--requires-password", tempIn];
+    // 1. Password validation check using `--requires-password`
+    // qpdf exit codes for --requires-password:
+    // - Code 2: File is unencrypted (does not require password)
+    // - Code 3: Password supplied is valid
+    // - Code 0: File requires a password (password missing or incorrect)
+    const checkArgs = password !== undefined
+      ? ["--requires-password", `--password=${password}`, tempIn]
+      : ["--requires-password", tempIn];
 
     const checkResult = await runQpdf(checkArgs);
 
-    // File is unencrypted
+    // Case A: Unencrypted PDF
     if (checkResult.exitCode === 2) {
       return base64Pdf;
     }
 
-    // Password missing for encrypted PDF
+    // Case B: Password was not supplied for a protected PDF
     if (password === undefined) {
       if (checkResult.exitCode === 0) {
         throw new Error(PDF_PASSWORD_REQUIRED);
@@ -73,17 +74,17 @@ export async function decryptPdf(
       throw new Error(PDF_DECRYPTION_FAILED);
     }
 
-    // Invalid password supplied
+    // Case C: Supplied password was rejected
     if (checkResult.exitCode === 0) {
       throw new Error(INVALID_PDF_PASSWORD);
     }
 
-    // Exit 3 means password accepted (even if warnings exist)
+    // Case D: Any unexpected exit code during validation
     if (checkResult.exitCode !== 3) {
       throw new Error(PDF_DECRYPTION_FAILED);
     }
 
-    // 2. Decrypt PDF
+    // 2. Perform actual decryption
     const decryptArgs = [
       `--password=${password}`,
       "--decrypt",
@@ -93,16 +94,7 @@ export async function decryptPdf(
 
     const decryptResult = await runQpdf(decryptArgs);
 
-    // In qpdf: exit code 0 (clean) and 3 (success with warnings) both produce valid output
-    const isSuccess = decryptResult.exitCode === 0 || decryptResult.exitCode === 3;
-
-    if (!isSuccess) {
-      throw new Error(PDF_DECRYPTION_FAILED);
-    }
-
-    // Verify output file exists and is not empty
-    const fileStats = await stat(tempOut);
-    if (fileStats.size === 0) {
+    if (decryptResult.exitCode !== 0) {
       throw new Error(PDF_DECRYPTION_FAILED);
     }
 
